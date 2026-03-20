@@ -1,10 +1,14 @@
 FROM node:20-slim
 
-# Install Java 17 (required by OpenDataLoader), LibreOffice, and ImageMagick
+# Install Java 17 (required by OpenDataLoader), LibreOffice, ImageMagick,
+# and build tools for native npm modules (sharp)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jre-headless \
     libreoffice-nogui \
     imagemagick \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Allow ImageMagick to convert PDFs (disabled by default in policy.xml)

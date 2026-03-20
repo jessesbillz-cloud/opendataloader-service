@@ -4,7 +4,6 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { execSync } = require("child_process");
-const { OpenDataLoaderPDF } = require("@opendataloader/pdf");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -91,6 +90,15 @@ function cleanup(...paths) {
   }
 }
 
+/** Clean up a directory (best-effort) */
+function cleanupDir(dirPath) {
+  try {
+    if (dirPath && fs.existsSync(dirPath)) {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+    }
+  } catch {}
+}
+
 // ── Routes ──
 
 app.get("/health", (_req, res) => {
@@ -104,19 +112,45 @@ app.post("/parse", upload.single("file"), async (req, res) => {
 
   const originalPath = req.file.path;
   let pdfPath = null;
+  const outputDir = path.join("/tmp", `odl-out-${Date.now()}`);
 
   try {
     // Step 1: Convert to PDF if needed
     pdfPath = await ensurePdf(originalPath);
 
-    // Step 2: Run OpenDataLoader PDF
-    const loader = new OpenDataLoaderPDF(pdfPath, { format: "json" });
-    const result = await loader.load();
+    // Step 2: Run OpenDataLoader PDF via convert()
+    const { convert } = require("@opendataloader/pdf");
+
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    await convert([pdfPath], {
+      outputDir: outputDir,
+      format: "json",
+    });
+
+    // Step 3: Read the JSON output file
+    const baseName = path.basename(pdfPath, ".pdf");
+    const jsonPath = path.join(outputDir, `${baseName}.json`);
+
+    let result;
+    if (fs.existsSync(jsonPath)) {
+      result = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+    } else {
+      // Fallback: find any .json file in the output dir
+      const files = fs.readdirSync(outputDir).filter(f => f.endsWith(".json"));
+      if (files.length > 0) {
+        result = JSON.parse(fs.readFileSync(path.join(outputDir, files[0]), "utf-8"));
+      } else {
+        throw new Error("OpenDataLoader produced no JSON output");
+      }
+    }
+
+    const pages = Array.isArray(result) ? result.length : (result.pages ? result.pages.length : 1);
 
     res.json({
       success: true,
       filename: req.file.originalname,
-      pages: result.length,
+      pages,
       data: result,
     });
   } catch (err) {
@@ -131,6 +165,8 @@ app.post("/parse", upload.single("file"), async (req, res) => {
     // Also clean intermediate files (HEIC→JPG)
     const jpgIntermediate = originalPath.replace(/\.heic$/i, ".jpg");
     if (jpgIntermediate !== originalPath) cleanup(jpgIntermediate);
+    // Clean output dir
+    cleanupDir(outputDir);
   }
 });
 
