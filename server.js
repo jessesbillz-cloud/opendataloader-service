@@ -105,10 +105,26 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+/** Load OpenDataLoader (handles both CJS and ESM packages) */
+let _odlModule = null;
+async function getODL() {
+  if (_odlModule) return _odlModule;
+  try {
+    _odlModule = require("@opendataloader/pdf");
+  } catch (e) {
+    // Fallback: dynamic import for ESM-only packages
+    _odlModule = await import("@opendataloader/pdf");
+  }
+  console.log("ODL module exports:", Object.keys(_odlModule));
+  return _odlModule;
+}
+
 app.post("/parse", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No file uploaded. Send multipart form-data with a 'file' field." });
   }
+
+  console.log("Uploaded file:", req.file.originalname, "path:", req.file.path);
 
   const originalPath = req.file.path;
   let pdfPath = null;
@@ -117,20 +133,48 @@ app.post("/parse", upload.single("file"), async (req, res) => {
   try {
     // Step 1: Convert to PDF if needed
     pdfPath = await ensurePdf(originalPath);
+    console.log("PDF path:", pdfPath, "exists:", fs.existsSync(pdfPath));
 
-    // Step 2: Run OpenDataLoader PDF via convert()
-    const { convert } = require("@opendataloader/pdf");
+    // Step 2: Load OpenDataLoader and run convert
+    const odl = await getODL();
+    const convert = odl.convert || odl.default?.convert || odl.default;
+
+    if (typeof convert !== "function") {
+      // Dump available exports for debugging
+      const keys = Object.keys(odl);
+      throw new Error(`No 'convert' function found. Available exports: ${keys.join(", ")}`);
+    }
 
     fs.mkdirSync(outputDir, { recursive: true });
 
-    await convert([pdfPath], {
-      outputDir: outputDir,
-      format: "json",
-    });
+    // Try the documented API: convert(paths[], options)
+    // If that fails, try alternative signatures
+    try {
+      await convert([pdfPath], { outputDir, format: "json" });
+    } catch (err1) {
+      console.log("API attempt 1 failed:", err1.message);
+      try {
+        // Try single string instead of array
+        await convert(pdfPath, { outputDir, format: "json" });
+      } catch (err2) {
+        console.log("API attempt 2 failed:", err2.message);
+        try {
+          // Try with input_path named param (Python-style)
+          await convert({ inputPath: pdfPath, outputDir, format: "json" });
+        } catch (err3) {
+          console.log("API attempt 3 failed:", err3.message);
+          // Try format as array
+          await convert([pdfPath], { outputDir, format: ["json"] });
+        }
+      }
+    }
 
     // Step 3: Read the JSON output file
     const baseName = path.basename(pdfPath, ".pdf");
     const jsonPath = path.join(outputDir, `${baseName}.json`);
+
+    console.log("Looking for output at:", jsonPath);
+    console.log("Output dir contents:", fs.existsSync(outputDir) ? fs.readdirSync(outputDir) : "DIR NOT FOUND");
 
     let result;
     if (fs.existsSync(jsonPath)) {
@@ -141,7 +185,8 @@ app.post("/parse", upload.single("file"), async (req, res) => {
       if (files.length > 0) {
         result = JSON.parse(fs.readFileSync(path.join(outputDir, files[0]), "utf-8"));
       } else {
-        throw new Error("OpenDataLoader produced no JSON output");
+        throw new Error("OpenDataLoader produced no JSON output. Dir contents: " +
+          fs.readdirSync(outputDir).join(", "));
       }
     }
 
@@ -154,18 +199,16 @@ app.post("/parse", upload.single("file"), async (req, res) => {
       data: result,
     });
   } catch (err) {
-    console.error("Parse error:", err);
+    console.error("Parse error:", err.stack || err);
     res.status(500).json({
       success: false,
       error: err.message || "Failed to parse file",
+      stack: process.env.NODE_ENV !== "production" ? err.stack : undefined,
     });
   } finally {
-    // Clean up all temp files
     cleanup(originalPath, pdfPath !== originalPath ? pdfPath : null);
-    // Also clean intermediate files (HEIC→JPG)
     const jpgIntermediate = originalPath.replace(/\.heic$/i, ".jpg");
     if (jpgIntermediate !== originalPath) cleanup(jpgIntermediate);
-    // Clean output dir
     cleanupDir(outputDir);
   }
 });
