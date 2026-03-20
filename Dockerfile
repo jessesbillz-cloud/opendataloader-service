@@ -21,7 +21,7 @@ RUN sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' /e
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 COPY server.js ./
 RUN mkdir -p /tmp/uploads
